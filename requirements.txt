@@ -1,0 +1,28 @@
+# ScalPrice - RAM Price Scraper Dependencies
+# Python 3.10+ required
+
+# === Core Scraping ===
+# Playwright for browser automation and JS rendering
+# Handles dynamic content, CAPTCHA pages (view), bot detection evasion
+playwright>=1.40.0
+
+# === Anti-Detection ===
+# Fake User-Agent rotation - provides real browser UA strings
+# FREE alternative to paid proxy rotation
+fake-useragent>=1.4.0
+
+# === Optional: Fallback HTTP Library ===
+# For simple sites that don't need JS rendering
+httpx>=0.25.0
+
+# === HTML Parsing (for non-JS pages) ===
+beautifulsoup4>=4.12.0
+lxml>=4.9.0
+
+# === Development & Testing ===
+# Uncomment for development
+# pytest>=7.4.0
+# pytest-asyncio>=0.21.0
+# black>=23.0.0
+# flake8>=6.0.0
+# mypy>=1.0.0

@@ -21,7 +21,6 @@ import asyncio
 import argparse
 import json
 import sys
-import platform
 from datetime import datetime
 from pathlib import Path
 from typing import List, Optional
@@ -381,15 +380,15 @@ async def main() -> int:
 
 def run():
     """
-    Entry point with Windows-compatible asyncio handling.
+    Entry point for the scraper.
 
-    Fixes the "unclosed transport" warnings on Windows by using
-    the WindowsSelectorEventLoopPolicy.
+    Note: On Windows, you may see "unclosed transport" warnings at exit.
+    These are harmless and don't affect functionality. They occur because
+    Playwright uses ProactorEventLoop which has cleanup quirks on Windows.
     """
-    # Fix for Windows asyncio issues
-    if platform.system() == "Windows":
-        # Use WindowsSelectorEventLoopPolicy to avoid ProactorEventLoop issues
-        asyncio.set_event_loop_policy(asyncio.WindowsSelectorEventLoopPolicy())
+    import warnings
+    # Suppress the asyncio cleanup warnings on Windows (cosmetic only)
+    warnings.filterwarnings("ignore", category=ResourceWarning)
 
     exit_code = asyncio.run(main())
     sys.exit(exit_code)

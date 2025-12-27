@@ -36,7 +36,7 @@ class Settings:
     # Whether to run browser in headless mode
     HEADLESS: bool = True
     # Browser to use: 'chromium', 'firefox', 'webkit'
-    BROWSER_TYPE: str = 'chromium'
+    BROWSER_TYPE: str = 'firefox'
 
     # === Output Settings ===
     # JSON output filename prefix

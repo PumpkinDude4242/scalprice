@@ -184,6 +184,51 @@ class BaseScraper(ABC):
         """
         pass
 
+    # === Product Discovery Methods ===
+    async def discover_products(self, search_queries: List[str], max_products: int = 20) -> List[str]:
+        """
+        Discover product URLs by searching the site.
+
+        This method should be overridden by child classes to implement
+        site-specific search functionality.
+
+        Args:
+            search_queries: List of search terms (e.g., ["DDR5 32Go", "Corsair Vengeance"])
+            max_products: Maximum number of product URLs to return
+
+        Returns:
+            List of discovered product URLs
+        """
+        self.logger.warning(f"discover_products() not implemented for {self.name}")
+        return []
+
+    def get_search_url(self, query: str) -> str:
+        """
+        Build search URL for a given query.
+        Override in child classes with site-specific URL format.
+
+        Args:
+            query: Search term
+
+        Returns:
+            Full search URL
+        """
+        # Default implementation - override in child classes
+        return f"{self.base_url}/search?q={query}"
+
+    async def extract_product_urls_from_search(self, page: Page) -> List[str]:
+        """
+        Extract product URLs from a search results page.
+        Override in child classes with site-specific selectors.
+
+        Args:
+            page: Playwright page on search results
+
+        Returns:
+            List of product URLs found on the page
+        """
+        return []
+
     # === Optional Methods - Can be overridden for site-specific behavior ===
     async def pre_scrape_hook(self, page: Page, url: str) -> None:
         """
@@ -473,3 +518,51 @@ class BaseScraper(ABC):
     def get_stats(self) -> Dict[str, int]:
         """Return scraping statistics."""
         return self.stats.copy()
+
+    async def run(
+        self,
+        urls: List[str] = None,
+        search_queries: List[str] = None,
+        max_products: int = 20,
+    ) -> List[NormalizedProduct]:
+        """
+        Main entry point: discover products via search OR scrape provided URLs.
+
+        This is the recommended way to run the scraper:
+        1. If search_queries provided: discover products first, then scrape
+        2. If urls provided: scrape those URLs directly
+        3. If both: combine discovered URLs with provided URLs
+
+        Args:
+            urls: Optional list of direct product URLs
+            search_queries: Optional list of search terms for discovery
+            max_products: Max products to discover per search
+
+        Returns:
+            List of scraped products
+        """
+        all_urls = set()
+
+        # Add direct URLs if provided
+        if urls:
+            all_urls.update(urls)
+            self.logger.info(f"Added {len(urls)} direct URLs")
+
+        # Discover products via search if queries provided
+        if search_queries:
+            self.logger.info(f"Discovering products via {len(search_queries)} search queries...")
+            try:
+                await self.setup_browser()
+                discovered = await self.discover_products(search_queries, max_products)
+                all_urls.update(discovered)
+                self.logger.info(f"Discovered {len(discovered)} product URLs")
+                await self.close_browser()
+            except Exception as e:
+                self.logger.error(f"Discovery failed: {e}")
+
+        if not all_urls:
+            self.logger.warning("No URLs to scrape!")
+            return []
+
+        # Now scrape all collected URLs
+        return await self.scrape_all(list(all_urls))

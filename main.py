@@ -6,10 +6,12 @@ Main entry point for the scraping engine.
 Orchestrates all scrapers and produces unified JSON output.
 
 Usage:
-    python main.py                    # Run all enabled scrapers
+    python main.py                              # Run all enabled scrapers with discovery
     python main.py --scrapers amazon_fr ldlc    # Run specific scrapers
-    python main.py --list             # List available scrapers
-    python main.py --help             # Show help
+    python main.py --no-discovery               # Use only direct URLs (no search)
+    python main.py --max-products 10            # Limit products per scraper
+    python main.py --list                       # List available scrapers
+    python main.py --help                       # Show help
 
 Output:
     Generates ram_prices_TIMESTAMP.json in the output directory
@@ -19,12 +21,13 @@ import asyncio
 import argparse
 import json
 import sys
+import platform
 from datetime import datetime
 from pathlib import Path
 from typing import List, Optional
 
 from config.settings import settings
-from config.products import PRODUCT_URLS
+from config.products import PRODUCT_URLS, RAM_SEARCH_QUERIES
 from scrapers import ScraperFactory, scraper_registry
 from utils.normalizer import NormalizedProduct
 from utils.logger import setup_logger, get_logger
@@ -33,9 +36,59 @@ from utils.logger import setup_logger, get_logger
 logger = get_logger("main")
 
 
-async def run_scraper(scraper_name: str, urls: List[str]) -> List[NormalizedProduct]:
+async def run_scraper_with_discovery(
+    scraper_name: str,
+    search_queries: List[str],
+    direct_urls: List[str] = None,
+    max_products: int = 20,
+) -> List[NormalizedProduct]:
     """
-    Run a single scraper for the given URLs.
+    Run a scraper with product discovery via search.
+
+    Args:
+        scraper_name: Name of the scraper to run
+        search_queries: List of search queries for product discovery
+        direct_urls: Optional list of direct product URLs
+        max_products: Maximum products to scrape
+
+    Returns:
+        List of scraped products
+    """
+    factory = ScraperFactory()
+    scraper = factory.create_scraper(scraper_name)
+
+    if not scraper:
+        logger.error(f"Unknown scraper: {scraper_name}")
+        return []
+
+    logger.info(f"Starting {scraper.display_name} with discovery mode...")
+    logger.info(f"  Search queries: {len(search_queries)}")
+    logger.info(f"  Direct URLs: {len(direct_urls) if direct_urls else 0}")
+    logger.info(f"  Max products: {max_products}")
+
+    try:
+        # Use the new run() method with discovery
+        products = await scraper.run(
+            urls=direct_urls,
+            search_queries=search_queries,
+            max_products=max_products,
+        )
+        stats = scraper.get_stats()
+        logger.info(
+            f"{scraper.display_name} complete: "
+            f"{stats['successful']}/{stats['total_urls']} successful"
+        )
+        return products
+    except Exception as e:
+        logger.error(f"Scraper {scraper_name} failed: {e}")
+        import traceback
+        traceback.print_exc()
+        return []
+
+
+async def run_scraper_direct(scraper_name: str, urls: List[str]) -> List[NormalizedProduct]:
+    """
+    Run a single scraper for the given URLs (no discovery).
 
     Args:
         scraper_name: Name of the scraper to run
@@ -51,7 +104,7 @@ async def run_scraper(scraper_name: str, urls: List[str]) -> List[NormalizedProd
         logger.error(f"Unknown scraper: {scraper_name}")
         return []
 
-    logger.info(f"Starting {scraper.display_name} scraper with {len(urls)} URLs...")
+    logger.info(f"Starting {scraper.display_name} scraper with {len(urls)} direct URLs...")
 
     try:
         products = await scraper.scrape_all(urls)
@@ -68,12 +121,16 @@ async def run_scraper(scraper_name: str, urls: List[str]) -> List[NormalizedProd
 
 async def run_all_scrapers(
     scraper_names: Optional[List[str]] = None,
+    use_discovery: bool = True,
+    max_products: int = 20,
 ) -> List[NormalizedProduct]:
     """
     Run multiple scrapers and aggregate results.
 
     Args:
         scraper_names: List of scraper names (None = use settings.ENABLED_SCRAPERS)
+        use_discovery: If True, discover products via search. If False, use direct URLs only.
+        max_products: Maximum products per scraper
 
     Returns:
         Combined list of all scraped products
@@ -84,14 +141,22 @@ async def run_all_scrapers(
     all_products: List[NormalizedProduct] = []
 
     for name in scraper_names:
-        # Get URLs for this scraper
-        urls = PRODUCT_URLS.get(name, [])
-        if not urls:
-            logger.warning(f"No URLs configured for scraper: {name}")
-            continue
+        if use_discovery:
+            # Use search queries for discovery
+            products = await run_scraper_with_discovery(
+                scraper_name=name,
+                search_queries=RAM_SEARCH_QUERIES,
+                direct_urls=PRODUCT_URLS.get(name, []),
+                max_products=max_products,
+            )
+        else:
+            # Use direct URLs only
+            urls = PRODUCT_URLS.get(name, [])
+            if not urls:
+                logger.warning(f"No direct URLs configured for scraper: {name}")
+                continue
+            products = await run_scraper_direct(name, urls)
 
-        # Run the scraper
-        products = await run_scraper(name, urls)
         all_products.extend(products)
 
         # Small delay between scrapers
@@ -154,9 +219,11 @@ def parse_args() -> argparse.Namespace:
         formatter_class=argparse.RawDescriptionHelpFormatter,
         epilog="""
 Examples:
-    python main.py                           Run all enabled scrapers
+    python main.py                           Run with product discovery (search)
+    python main.py --no-discovery            Use only direct URLs (no search)
     python main.py --scrapers amazon_fr      Run only Amazon FR
     python main.py --scrapers amazon_fr ldlc Run Amazon and LDLC
+    python main.py --max-products 10         Limit to 10 products per scraper
     python main.py --list                    List available scrapers
     python main.py --headless false          Run with visible browser
         """
@@ -172,6 +239,19 @@ Examples:
         "--list", "-l",
         action="store_true",
         help="List available scrapers and exit",
+    )
+
+    parser.add_argument(
+        "--no-discovery",
+        action="store_true",
+        help="Disable product discovery (use direct URLs only)",
+    )
+
+    parser.add_argument(
+        "--max-products", "-m",
+        type=int,
+        default=20,
+        help="Maximum products per scraper (default: 20)",
     )
 
     parser.add_argument(
@@ -230,16 +310,26 @@ async def main() -> int:
             logger.info(f"Available scrapers: {scraper_registry.list_available()}")
             return 1
 
+    # Determine mode
+    use_discovery = not args.no_discovery
+    mode_str = "Discovery Mode (search)" if use_discovery else "Direct URLs Only"
+
     logger.info("=" * 50)
     logger.info("ScalPrice - RAM Price Scraper Engine")
     logger.info("=" * 50)
+    logger.info(f"Mode: {mode_str}")
     logger.info(f"Scrapers to run: {', '.join(scraper_names)}")
+    logger.info(f"Max products per scraper: {args.max_products}")
     logger.info(f"Headless mode: {settings.HEADLESS}")
     logger.info("")
 
     try:
         # Run scrapers
-        products = await run_all_scrapers(scraper_names)
+        products = await run_all_scrapers(
+            scraper_names,
+            use_discovery=use_discovery,
+            max_products=args.max_products,
+        )
 
         if not products:
             logger.warning("No products were scraped!")
@@ -270,6 +360,8 @@ async def main() -> int:
         logger.info("")
         logger.info("Summary by source:")
         for source, stats in sources.items():
+            if stats['min_price'] == float('inf'):
+                stats['min_price'] = 0
             logger.info(
                 f"  {source}: {stats['count']} products, "
                 f"prices {stats['min_price']:.2f}€ - {stats['max_price']:.2f}€"
@@ -287,6 +379,21 @@ async def main() -> int:
         return 1
 
 
-if __name__ == "__main__":
+def run():
+    """
+    Entry point with Windows-compatible asyncio handling.
+
+    Fixes the "unclosed transport" warnings on Windows by using
+    the WindowsSelectorEventLoopPolicy.
+    """
+    # Fix for Windows asyncio issues
+    if platform.system() == "Windows":
+        # Use WindowsSelectorEventLoopPolicy to avoid ProactorEventLoop issues
+        asyncio.set_event_loop_policy(asyncio.WindowsSelectorEventLoopPolicy())
+
     exit_code = asyncio.run(main())
     sys.exit(exit_code)
+
+
+if __name__ == "__main__":
+    run()

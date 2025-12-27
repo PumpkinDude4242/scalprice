@@ -20,7 +20,8 @@ ANTI-DETECTION STRATEGIES USED:
 
 import asyncio
 import re
-from typing import Optional
+import urllib.parse
+from typing import Optional, List
 from playwright.async_api import Page, TimeoutError as PlaywrightTimeout
 
 from .base import BaseScraper, ScrapingResult
@@ -372,3 +373,109 @@ class AmazonScraper(BaseScraper):
         """
         # Nothing special needed for Amazon
         pass
+
+    # === Product Discovery Methods ===
+    def get_search_url(self, query: str) -> str:
+        """
+        Build Amazon search URL.
+
+        Amazon search URL format:
+        https://www.amazon.fr/s?k=DDR5+32Go
+        """
+        encoded_query = urllib.parse.quote_plus(query)
+        return f"{self.base_url}/s?k={encoded_query}"
+
+    async def extract_product_urls_from_search(self, page: Page) -> List[str]:
+        """
+        Extract product URLs from Amazon search results page.
+
+        Amazon search results have links like:
+        <a href="/dp/B09PHJG4ML/...">
+        """
+        urls = set()
+
+        try:
+            # Wait for search results to load
+            await page.wait_for_selector('[data-component-type="s-search-result"]', timeout=10000)
+
+            # Find all product links - Amazon uses /dp/ pattern
+            links = page.locator('a[href*="/dp/"]')
+            count = await links.count()
+
+            for i in range(min(count, 50)):  # Limit to first 50
+                try:
+                    href = await links.nth(i).get_attribute("href")
+                    if href and "/dp/" in href:
+                        # Extract ASIN from URL
+                        match = re.search(r'/dp/([A-Z0-9]{10})', href)
+                        if match:
+                            asin = match.group(1)
+                            # Build clean product URL
+                            clean_url = f"{self.base_url}/dp/{asin}"
+                            urls.add(clean_url)
+                except Exception:
+                    continue
+
+            self.logger.debug(f"Found {len(urls)} product URLs on search page")
+
+        except PlaywrightTimeout:
+            self.logger.warning("No search results found (timeout)")
+        except Exception as e:
+            self.logger.error(f"Error extracting search results: {e}")
+
+        return list(urls)
+
+    async def discover_products(
+        self,
+        search_queries: List[str],
+        max_products: int = 20
+    ) -> List[str]:
+        """
+        Discover Amazon products by searching.
+
+        Args:
+            search_queries: List of search terms (e.g., ["DDR5 32Go RAM"])
+            max_products: Maximum total products to return
+
+        Returns:
+            List of discovered product URLs
+        """
+        all_urls = set()
+
+        for query in search_queries:
+            if len(all_urls) >= max_products:
+                break
+
+            search_url = self.get_search_url(query)
+            self.logger.info(f"Searching Amazon: '{query}'")
+
+            try:
+                # Navigate to search results
+                if await self.navigate_to_url(search_url):
+                    # Handle cookie popup on first search
+                    await self._handle_cookie_popup(self._page)
+
+                    # Check for bot detection
+                    if await self._is_bot_detected(self._page):
+                        self.logger.warning("Bot detection on search - backing off")
+                        await self.handle_bot_detection(self._page)
+                        continue
+
+                    # Extract product URLs
+                    urls = await self.extract_product_urls_from_search(self._page)
+
+                    for url in urls:
+                        if len(all_urls) >= max_products:
+                            break
+                        all_urls.add(url)
+
+                    self.logger.info(f"  Found {len(urls)} products for '{query}'")
+
+            except Exception as e:
+                self.logger.error(f"Search failed for '{query}': {e}")
+
+            # Longer delay for Amazon (more aggressive detection)
+            await self.anti_detection.random_delay(multiplier=1.5)
+
+        self.logger.info(f"Total discovered: {len(all_urls)} unique product URLs")
+        return list(all_urls)[:max_products]

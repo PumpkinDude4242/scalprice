@@ -13,12 +13,16 @@ LDLC has lighter protection, but we still apply:
 - Random delays (they do have rate limiting)
 - User-Agent rotation
 - Cookie consent handling
+
+MPN EXTRACTION:
+LDLC displays the MPN (Référence constructeur) in the product specifications.
+This is critical for cross-site matching.
 """
 
 import asyncio
 import re
 import urllib.parse
-from typing import Optional, List
+from typing import Optional, List, Dict, Any
 from playwright.async_api import Page, TimeoutError as PlaywrightTimeout
 
 from .base import BaseScraper, ScrapingResult
@@ -30,7 +34,7 @@ class LDLCScraper(BaseScraper):
     Scraper for LDLC.com (French tech retailer).
 
     LDLC has a cleaner structure than Amazon, making it
-    easier to scrape reliably.
+    easier to scrape reliably. Also extracts MPN for cross-site matching.
     """
 
     @property
@@ -86,6 +90,25 @@ class LDLCScraper(BaseScraper):
         ".product-stock",
         ".in-stock",
         ".out-of-stock",
+    ]
+
+    # MPN / Manufacturer Reference selectors
+    # LDLC shows this in specs table as "Référence constructeur" or "MPN"
+    MPN_SELECTORS = [
+        # Specs table row with "Référence" label
+        ".specs-table tr:has(th:text-matches('Réf.*constructeur', 'i')) td",
+        ".product-specs tr:has(th:text-matches('Réf.*constructeur', 'i')) td",
+        # Alternative: look for MPN pattern in page
+        "[itemprop='mpn']",
+        "[data-mpn]",
+    ]
+
+    # Brand selectors
+    BRAND_SELECTORS = [
+        ".product-brand",
+        "[itemprop='brand']",
+        ".brand-name",
+        "a.brand",
     ]
 
     def get_price_selector(self) -> str:
@@ -358,6 +381,163 @@ class LDLCScraper(BaseScraper):
         self.logger.warning("LDLC rate limiting detected, applying backoff...")
         await self.anti_detection.backoff_delay()
         return False
+
+    # === MPN Extraction Methods ===
+    async def extract_mpn(self, page: Page) -> Optional[str]:
+        """
+        Extract the Manufacturer Part Number (MPN) from LDLC product page.
+
+        LDLC displays the MPN as "Référence constructeur" in the specs table.
+        This is CRITICAL for cross-site product matching.
+
+        Returns:
+            MPN string or None if not found
+        """
+        # Method 1: Try structured selectors
+        for selector in self.MPN_SELECTORS:
+            try:
+                element = page.locator(selector).first
+                if await element.count() > 0:
+                    mpn = await element.text_content()
+                    if mpn:
+                        mpn = mpn.strip()
+                        if mpn and len(mpn) > 3:
+                            self.logger.debug(f"Found MPN via selector: {mpn}")
+                            return mpn
+            except Exception:
+                continue
+
+        # Method 2: Parse the specs table manually
+        try:
+            # Look for all table rows in specs section
+            rows = page.locator(".product-sheet table tr, .specs tr, .characteristics tr")
+            count = await rows.count()
+
+            for i in range(count):
+                row = rows.nth(i)
+                try:
+                    # Get header/label cell
+                    header = await row.locator("th, td:first-child").first.text_content()
+                    if header and any(kw in header.lower() for kw in [
+                        "référence constructeur",
+                        "ref constructeur",
+                        "réf. constructeur",
+                        "mpn",
+                        "part number",
+                        "numéro de modèle"
+                    ]):
+                        # Get value cell
+                        value = await row.locator("td:last-child, td:nth-child(2)").first.text_content()
+                        if value:
+                            mpn = value.strip()
+                            if mpn and len(mpn) > 3:
+                                self.logger.debug(f"Found MPN in specs table: {mpn}")
+                                return mpn
+                except Exception:
+                    continue
+
+        except Exception as e:
+            self.logger.debug(f"Specs table parsing failed: {e}")
+
+        # Method 3: Search in page content with regex
+        try:
+            content = await page.content()
+
+            # Common MPN patterns for RAM:
+            # Kingston: KF564S38IBK2-32, KVR32S22D8/32
+            # Corsair: CMK32GX5M2B5600C36
+            # G.Skill: F5-6000J3636F16GX2-TZ5N
+            patterns = [
+                r'"mpn":\s*"([A-Z0-9][A-Z0-9\-_]{5,30})"',
+                r'Réf(?:érence)?\.?\s*constructeur[:\s]+([A-Z0-9][A-Z0-9\-_]{5,30})',
+                r'MPN[:\s]+([A-Z0-9][A-Z0-9\-_]{5,30})',
+            ]
+
+            for pattern in patterns:
+                match = re.search(pattern, content, re.IGNORECASE)
+                if match:
+                    mpn = match.group(1).strip()
+                    if len(mpn) > 5:
+                        self.logger.debug(f"Found MPN via regex: {mpn}")
+                        return mpn
+
+        except Exception as e:
+            self.logger.debug(f"Content regex search failed: {e}")
+
+        self.logger.warning("Could not extract MPN from page")
+        return None
+
+    async def extract_brand(self, page: Page) -> Optional[str]:
+        """
+        Extract the brand/manufacturer name from LDLC product page.
+
+        Returns:
+            Brand name or None
+        """
+        for selector in self.BRAND_SELECTORS:
+            try:
+                element = page.locator(selector).first
+                if await element.count() > 0:
+                    brand = await element.text_content()
+                    if brand:
+                        return brand.strip()
+            except Exception:
+                continue
+
+        # Try to extract from product name
+        try:
+            name = await self.extract_product_name(page)
+            if name:
+                # Common brands at the start of product names
+                brands = [
+                    "Kingston", "Corsair", "G.Skill", "Crucial", "Samsung",
+                    "HyperX", "TeamGroup", "Patriot", "ADATA", "PNY",
+                    "Lexar", "Western Digital", "Seagate", "Toshiba"
+                ]
+                for brand in brands:
+                    if name.lower().startswith(brand.lower()):
+                        return brand
+        except Exception:
+            pass
+
+        return None
+
+    async def extract_full_product_data(self, page: Page, url: str) -> Optional[Dict[str, Any]]:
+        """
+        Extract all product data including MPN for the comparator pipeline.
+
+        Returns:
+            Dict with all product data or None if MPN extraction fails
+        """
+        mpn = await self.extract_mpn(page)
+
+        if not mpn:
+            self.logger.warning(f"Skipping product (no MPN): {url}")
+            return None
+
+        name = await self.extract_product_name(page)
+        price_str = await self.extract_price(page)
+        image_url = await self.extract_image_url(page)
+        available = await self.check_availability(page)
+        brand = await self.extract_brand(page)
+
+        # Parse price
+        price = 0.0
+        if price_str:
+            price_val, _ = self.normalizer.normalize_price(price_str)
+            price = price_val or 0.0
+
+        return {
+            "mpn": mpn,
+            "name": name or f"Product {mpn}",
+            "brand": brand or "",
+            "price": price,
+            "currency": "EUR",
+            "stock": available,
+            "url": url,
+            "image_url": image_url or "",
+            "retailer": self.name,
+        }
 
     # === Product Discovery Methods ===
     def get_search_url(self, query: str) -> str:

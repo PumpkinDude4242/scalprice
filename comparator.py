@@ -150,7 +150,7 @@ class PriceComparator:
 
         try:
             # Discover product URLs via search
-            await scraper.initialize()
+            await scraper.setup_browser()
 
             product_urls = []
             for query in search_queries:
@@ -213,7 +213,7 @@ class PriceComparator:
                 await asyncio.sleep(1.5)
 
         finally:
-            await scraper.close()
+            await scraper.close_browser()
 
         logger.info(f"\nLDLC Phase Complete: {self.stats['mpns_found']} products with MPNs")
 
@@ -272,7 +272,7 @@ class PriceComparator:
                 logger.warning(f"    No scraper available for {retailer}")
                 return
 
-            await scraper.initialize()
+            await scraper.setup_browser()
 
             try:
                 if await scraper.navigate_to_url(url):
@@ -309,7 +309,7 @@ class PriceComparator:
                         logger.warning(f"      Could not extract price")
 
             finally:
-                await scraper.close()
+                await scraper.close_browser()
 
         except Exception as e:
             logger.error(f"      Error: {e}")
